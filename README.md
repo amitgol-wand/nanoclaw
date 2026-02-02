@@ -3,42 +3,57 @@
 </p>
 
 <p align="center">
-  My personal Claude assistant that runs securely in containers. Lightweight and built to be understood and customized for your own needs.
+  <strong>Cursor Edition</strong> - My personal AI assistant that runs securely in containers using Cursor Agent CLI.
 </p>
 
-## Why I Built This
+> **Note**: This is a fork of [NanoClaw](https://github.com/gavrielc/nanoclaw) modified to use Cursor Agent CLI instead of Claude Agent SDK.
 
-[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But I can't sleep well running software I don't understand with access to my life. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
+## Why This Fork?
 
-NanoClaw gives you the same core functionality in a codebase you can understand in 8 minutes. One process. A handful of files. Agents run in actual Linux containers with filesystem isolation, not behind permission checks.
+The original NanoClaw uses Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`). This fork replaces it with Cursor CLI (`agent`), allowing you to use Cursor's agent capabilities instead.
+
+**Key differences from original:**
+- Uses `CURSOR_API_KEY` instead of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`
+- Runs `agent` CLI in non-interactive mode instead of Claude SDK's `query()` function
+- IPC tools are embedded in prompts instead of using SDK's MCP server
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/gavrielc/nanoclaw.git
+git clone https://github.com/amitgol-wand/nanoclaw.git
 cd nanoclaw
-claude
 ```
 
-Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
+### Prerequisites
+1. **Cursor CLI** - Install from Cursor IDE or run: `curl https://cursor.com/install -fsS | bash`
+2. **API Key** - Get your `CURSOR_API_KEY` from Cursor settings
+
+### Setup
+```bash
+# Create .env file with your Cursor API key
+echo "CURSOR_API_KEY=your_key_here" > .env
+
+# Install dependencies
+npm install
+
+# Build the agent container
+./container/build.sh
+
+# Run in development mode
+npm run dev
+```
+
+For WhatsApp authentication, run `npm run auth` first.
 
 ## Philosophy
 
-**Small enough to understand.** One process, a few source files. No microservices, no message queues, no abstraction layers. Have Claude Code walk you through it.
+**Small enough to understand.** One process, a few source files. No microservices, no message queues, no abstraction layers.
 
 **Secure by isolation.** Agents run in Linux containers (Apple Container on macOS, or Docker). They can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
 
-**Built for one user.** This isn't a framework. It's working software that fits my exact needs. You fork it and have Claude Code make it match your exact needs.
+**Built for one user.** This isn't a framework. It's working software that fits exact needs. Fork it and customize.
 
-**Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that this is safe.
-
-**AI-native.** No installation wizard; Claude Code guides setup. No monitoring dashboard; ask Claude what's happening. No debugging tools; describe the problem, Claude fixes it.
-
-**Skills over features.** Contributors shouldn't add features (e.g. support for Telegram) to the codebase. Instead, they contribute [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
-
-**Best harness, best model.** This runs on Claude Agent SDK, which means you're running Claude Code directly. The harness matters. A bad harness makes even smart models seem dumb, a good harness gives them superpowers. Claude Code is (IMO) the best harness available.
-
-**No ToS gray areas.** Because it uses Claude Agent SDK natively with no hacks or workarounds, using your subscription with your auth token is completely legitimate (I think). No risk of being shut down for terms of service violations (I am not a lawyer).
+**Cursor-powered.** This fork uses Cursor Agent CLI, giving you access to Cursor's agent capabilities and model selection.
 
 ## What It Supports
 
@@ -107,13 +122,14 @@ Skills we'd love to see:
 
 - macOS or Linux
 - Node.js 20+
-- [Claude Code](https://claude.ai/download)
+- [Cursor CLI](https://cursor.com/docs/cli) (`curl https://cursor.com/install -fsS | bash`)
 - [Apple Container](https://github.com/apple/container) (macOS) or [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
+- `CURSOR_API_KEY` from Cursor settings
 
 ## Architecture
 
 ```
-WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Cursor Agent CLI) --> Response
 ```
 
 Single Node.js process. Agents execute in isolated Linux containers with mounted directories. IPC via filesystem. No daemons, no queues, no complexity.

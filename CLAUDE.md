@@ -1,10 +1,12 @@
-# NanoClaw
+# NanoClaw (Cursor Edition)
 
-Personal Claude assistant. See [README.md](README.md) for philosophy and setup. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for architecture decisions.
+Personal AI assistant using Cursor Agent CLI. See [README.md](README.md) for philosophy and setup.
 
 ## Quick Context
 
-Single Node.js process that connects to WhatsApp, routes messages to Claude Agent SDK running in Apple Container (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process that connects to WhatsApp, routes messages to Cursor Agent CLI running in Apple Container (Linux VMs). Each group has isolated filesystem and memory.
+
+**Key difference from original NanoClaw:** Uses `CURSOR_API_KEY` and Cursor CLI instead of Claude Agent SDK.
 
 ## Key Files
 

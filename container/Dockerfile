@@ -1,5 +1,5 @@
-# NanoClaw Agent Container
-# Runs Claude Agent SDK in isolated Linux VM with browser automation
+# NanoClaw Agent Container (Cursor Edition)
+# Runs Cursor Agent CLI in isolated Linux VM with browser automation
 
 FROM node:22-slim
 
@@ -25,12 +25,16 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chromium path for agent-browser
+# Set Chromium path for browser automation
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install Cursor CLI and agent-browser globally
+RUN curl https://cursor.com/install -fsS | bash \
+    && npm install -g agent-browser
+
+# Add Cursor CLI to PATH
+ENV PATH="/root/.local/bin:$PATH"
 
 # Create app directory
 WORKDIR /app
@@ -54,11 +58,16 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 # Sources env from mounted /workspace/env-dir/env if it exists (workaround for Apple Container -i bug)
 RUN printf '#!/bin/bash\nset -e\n[ -f /workspace/env-dir/env ] && export $(cat /workspace/env-dir/env | xargs)\ncat > /tmp/input.json\nnode /app/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
-# Set ownership to node user (non-root) for writable directories
-RUN chown -R node:node /workspace
+# Copy Cursor CLI to node user's path and set ownership
+RUN mkdir -p /home/node/.local/bin \
+    && cp -r /root/.local/bin/* /home/node/.local/bin/ 2>/dev/null || true \
+    && chown -R node:node /workspace /home/node/.local
 
-# Switch to non-root user (required for --dangerously-skip-permissions)
+# Switch to non-root user
 USER node
+
+# Add Cursor CLI to node user's PATH
+ENV PATH="/home/node/.local/bin:$PATH"
 
 # Set working directory to group workspace
 WORKDIR /workspace/group

@@ -1,12 +1,12 @@
 /**
- * NanoClaw Agent Runner
+ * NanoClaw Agent Runner (Cursor Edition)
  * Runs inside a container, receives config via stdin, outputs result to stdout
+ * Uses Cursor CLI instead of Claude Agent SDK
  */
 
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { createIpcMcp } from './ipc-mcp.js';
 
 interface ContainerInput {
   prompt: string;
@@ -24,15 +24,13 @@ interface ContainerOutput {
   error?: string;
 }
 
-interface SessionEntry {
-  sessionId: string;
-  fullPath: string;
-  summary: string;
-  firstPrompt: string;
-}
-
-interface SessionsIndex {
-  entries: SessionEntry[];
+interface CursorJsonOutput {
+  type: string;
+  subtype?: string;
+  is_error?: boolean;
+  duration_ms?: number;
+  result?: string;
+  session_id?: string;
 }
 
 async function readStdin(): Promise<string> {
@@ -58,146 +56,199 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
-function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
-  // sessions-index.json is in the same directory as the transcript
-  const projectDir = path.dirname(transcriptPath);
-  const indexPath = path.join(projectDir, 'sessions-index.json');
+/**
+ * Build the IPC instructions to embed in the prompt.
+ * This tells Cursor how to use the IPC mechanism for sending messages and scheduling tasks.
+ */
+function buildIpcInstructions(ctx: { chatJid: string; groupFolder: string; isMain: boolean }): string {
+  const { chatJid, groupFolder, isMain } = ctx;
+  
+  return `
+## NanoClaw IPC System
 
-  if (!fs.existsSync(indexPath)) {
-    log(`Sessions index not found at ${indexPath}`);
-    return null;
-  }
+You have access to a file-based IPC system for communicating with the host WhatsApp router.
+Write JSON files to the appropriate directories to trigger actions.
 
-  try {
-    const index: SessionsIndex = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-    const entry = index.entries.find(e => e.sessionId === sessionId);
-    if (entry?.summary) {
-      return entry.summary;
-    }
-  } catch (err) {
-    log(`Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`);
-  }
+### Send Message to WhatsApp
+Write a JSON file to \`/workspace/ipc/messages/\` with this structure:
+\`\`\`json
+{
+  "type": "message",
+  "chatJid": "${chatJid}",
+  "text": "Your message here",
+  "groupFolder": "${groupFolder}",
+  "timestamp": "ISO timestamp"
+}
+\`\`\`
+Filename should be unique, e.g., \`{timestamp}-{random}.json\`
 
-  return null;
+### Schedule a Task
+Write a JSON file to \`/workspace/ipc/tasks/\` with this structure:
+\`\`\`json
+{
+  "type": "schedule_task",
+  "prompt": "What the agent should do when task runs",
+  "schedule_type": "cron|interval|once",
+  "schedule_value": "cron expression or milliseconds or ISO timestamp",
+  "context_mode": "group|isolated",
+  "groupFolder": "${groupFolder}",
+  "chatJid": "${chatJid}",
+  "timestamp": "ISO timestamp"
+}
+\`\`\`
+
+### List Tasks
+Read \`/workspace/ipc/current_tasks.json\` to see scheduled tasks.
+
+### Pause/Resume/Cancel Task
+Write to \`/workspace/ipc/tasks/\`:
+\`\`\`json
+{
+  "type": "pause_task|resume_task|cancel_task",
+  "taskId": "task-id-here",
+  "timestamp": "ISO timestamp"
+}
+\`\`\`
+
+${isMain ? `### Register New Group (Main Only)
+Write to \`/workspace/ipc/tasks/\`:
+\`\`\`json
+{
+  "type": "register_group",
+  "jid": "WhatsApp JID",
+  "name": "Display name",
+  "folder": "folder-name",
+  "trigger": "@TriggerWord",
+  "timestamp": "ISO timestamp"
+}
+\`\`\`
+Check \`/workspace/ipc/available_groups.json\` for available groups.` : ''}
+`;
 }
 
 /**
- * Archive the full transcript to conversations/ before compaction.
+ * Run Cursor CLI with the given prompt.
  */
-function createPreCompactHook(): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preCompact = input as PreCompactHookInput;
-    const transcriptPath = preCompact.transcript_path;
-    const sessionId = preCompact.session_id;
+async function runCursorAgent(input: ContainerInput): Promise<ContainerOutput> {
+  const { prompt, sessionId, groupFolder, chatJid, isMain, isScheduledTask } = input;
 
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      log('No transcript found for archiving');
-      return {};
-    }
+  // Build the full prompt with IPC instructions
+  const ipcInstructions = buildIpcInstructions({ chatJid, groupFolder, isMain });
+  
+  let fullPrompt = prompt;
+  if (isScheduledTask) {
+    fullPrompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use the IPC system to send messages if needed.]\n\n${prompt}`;
+  }
+  
+  // Add IPC instructions as system context
+  fullPrompt = `${ipcInstructions}\n\n---\n\n${fullPrompt}`;
 
-    try {
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      const messages = parseTranscript(content);
+  // Build Cursor CLI arguments
+  const args: string[] = [
+    '-p', fullPrompt,
+    '--output-format', 'json',
+    '--dangerously-skip-permissions'
+  ];
 
-      if (messages.length === 0) {
-        log('No messages to archive');
-        return {};
-      }
-
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
-
-      const conversationsDir = '/workspace/group/conversations';
-      fs.mkdirSync(conversationsDir, { recursive: true });
-
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
-      const filePath = path.join(conversationsDir, filename);
-
-      const markdown = formatTranscriptMarkdown(messages, summary);
-      fs.writeFileSync(filePath, markdown);
-
-      log(`Archived conversation to ${filePath}`);
-    } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    return {};
-  };
-}
-
-function sanitizeFilename(summary: string): string {
-  return summary
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 50);
-}
-
-function generateFallbackName(): string {
-  const time = new Date();
-  return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
-}
-
-interface ParsedMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-function parseTranscript(content: string): ParsedMessage[] {
-  const messages: ParsedMessage[] = [];
-
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      if (entry.type === 'user' && entry.message?.content) {
-        const text = typeof entry.message.content === 'string'
-          ? entry.message.content
-          : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
-        if (text) messages.push({ role: 'user', content: text });
-      } else if (entry.type === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content
-          .filter((c: { type: string }) => c.type === 'text')
-          .map((c: { text: string }) => c.text);
-        const text = textParts.join('');
-        if (text) messages.push({ role: 'assistant', content: text });
-      }
-    } catch {
-    }
+  // Resume session if provided
+  if (sessionId) {
+    args.push('--resume', sessionId);
   }
 
-  return messages;
-}
+  log(`Running Cursor agent with ${args.length} args, session: ${sessionId || 'new'}`);
 
-function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null): string {
-  const now = new Date();
-  const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true
+  return new Promise((resolve) => {
+    const agent = spawn('agent', args, {
+      cwd: '/workspace/group',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        // Cursor uses CURSOR_API_KEY for authentication
+        // The env file should contain this
+      }
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    agent.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    agent.stderr.on('data', (data) => {
+      const chunk = data.toString();
+      stderr += chunk;
+      // Log stderr lines for debugging
+      chunk.trim().split('\n').forEach((line: string) => {
+        if (line) log(`[cursor] ${line}`);
+      });
+    });
+
+    agent.on('close', (code) => {
+      log(`Cursor agent exited with code ${code}`);
+
+      if (code !== 0) {
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Cursor agent exited with code ${code}: ${stderr.slice(-500)}`
+        });
+        return;
+      }
+
+      try {
+        // Parse Cursor's JSON output
+        // Cursor outputs multiple JSON objects, we want the final result
+        const lines = stdout.trim().split('\n');
+        let result: string | null = null;
+        let newSessionId: string | undefined;
+
+        for (const line of lines) {
+          try {
+            const parsed: CursorJsonOutput = JSON.parse(line);
+            
+            if (parsed.type === 'result' && parsed.subtype === 'success') {
+              result = parsed.result || null;
+              newSessionId = parsed.session_id;
+            }
+          } catch {
+            // Skip non-JSON lines
+          }
+        }
+
+        if (result !== null) {
+          log('Cursor agent completed successfully');
+          resolve({
+            status: 'success',
+            result,
+            newSessionId
+          });
+        } else {
+          // No result found, might be an error
+          resolve({
+            status: 'error',
+            result: null,
+            error: 'No result in Cursor output'
+          });
+        }
+      } catch (err) {
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Failed to parse Cursor output: ${err instanceof Error ? err.message : String(err)}`
+        });
+      }
+    });
+
+    agent.on('error', (err) => {
+      log(`Cursor agent spawn error: ${err.message}`);
+      resolve({
+        status: 'error',
+        result: null,
+        error: `Failed to spawn Cursor agent: ${err.message}`
+      });
+    });
   });
-
-  const lines: string[] = [];
-  lines.push(`# ${title || 'Conversation'}`);
-  lines.push('');
-  lines.push(`Archived: ${formatDateTime(now)}`);
-  lines.push('');
-  lines.push('---');
-  lines.push('');
-
-  for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'Andy';
-    const content = msg.content.length > 2000
-      ? msg.content.slice(0, 2000) + '...'
-      : msg.content;
-    lines.push(`**${sender}**: ${content}`);
-    lines.push('');
-  }
-
-  return lines.join('\n');
 }
 
 async function main(): Promise<void> {
@@ -216,70 +267,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const ipcMcp = createIpcMcp({
-    chatJid: input.chatJid,
-    groupFolder: input.groupFolder,
-    isMain: input.isMain
-  });
-
-  let result: string | null = null;
-  let newSessionId: string | undefined;
-
-  // Add context for scheduled tasks
-  let prompt = input.prompt;
-  if (input.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
-  }
-
   try {
-    log('Starting agent...');
-
-    for await (const message of query({
-      prompt,
-      options: {
-        cwd: '/workspace/group',
-        resume: input.sessionId,
-        allowedTools: [
-          'Bash',
-          'Read', 'Write', 'Edit', 'Glob', 'Grep',
-          'WebSearch', 'WebFetch',
-          'mcp__nanoclaw__*'
-        ],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project'],
-        mcpServers: {
-          nanoclaw: ipcMcp
-        },
-        hooks: {
-          PreCompact: [{ hooks: [createPreCompactHook()] }]
-        }
-      }
-    })) {
-      if (message.type === 'system' && message.subtype === 'init') {
-        newSessionId = message.session_id;
-        log(`Session initialized: ${newSessionId}`);
-      }
-
-      if ('result' in message && message.result) {
-        result = message.result as string;
-      }
+    log('Starting Cursor agent...');
+    const output = await runCursorAgent(input);
+    writeOutput(output);
+    
+    if (output.status === 'error') {
+      process.exit(1);
     }
-
-    log('Agent completed successfully');
-    writeOutput({
-      status: 'success',
-      result,
-      newSessionId
-    });
-
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
     writeOutput({
       status: 'error',
       result: null,
-      newSessionId,
       error: errorMessage
     });
     process.exit(1);
