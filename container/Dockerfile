@@ -58,16 +58,17 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 # Sources env from mounted /workspace/env-dir/env if it exists (workaround for Apple Container -i bug)
 RUN printf '#!/bin/bash\nset -e\n[ -f /workspace/env-dir/env ] && export $(cat /workspace/env-dir/env | xargs)\ncat > /tmp/input.json\nnode /app/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
-# Copy Cursor CLI to node user's path and set ownership
-RUN mkdir -p /home/node/.local/bin \
-    && cp -r /root/.local/bin/* /home/node/.local/bin/ 2>/dev/null || true \
+# Copy Cursor CLI to node user's path (copy entire .local including share with actual binaries)
+RUN mkdir -p /home/node/.local \
+    && cp -rL /root/.local/* /home/node/.local/ 2>/dev/null || true \
+    && chmod -R +x /home/node/.local/bin/ \
     && chown -R node:node /workspace /home/node/.local
 
 # Switch to non-root user
 USER node
 
-# Add Cursor CLI to node user's PATH
-ENV PATH="/home/node/.local/bin:$PATH"
+# Add Cursor CLI to node user's PATH (point directly to versions dir with node binary)
+ENV PATH="/home/node/.local/share/cursor-agent/versions/2026.01.28-fd13201:/home/node/.local/bin:$PATH"
 
 # Set working directory to group workspace
 WORKDIR /workspace/group
