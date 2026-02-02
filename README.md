@@ -26,7 +26,12 @@ cd nanoclaw
 
 ### Prerequisites
 1. **Cursor CLI** - Install from Cursor IDE or run: `curl https://cursor.com/install -fsS | bash`
-2. **API Key** - Get your `CURSOR_API_KEY` from Cursor settings
+2. **Cursor Pro subscription** - $20/mo from [cursor.com/pricing](https://cursor.com/pricing)
+3. **API Key** - Generate from Cursor dashboard:
+   - Go to [cursor.com/dashboard](https://cursor.com/dashboard)
+   - Navigate to **Integrations > User API Keys**
+   - Click **Generate** to create a new key
+   - Copy the key for use in setup below
 
 ### Setup
 ```bash
