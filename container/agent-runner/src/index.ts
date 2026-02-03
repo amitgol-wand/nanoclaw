@@ -57,73 +57,32 @@ function log(message: string): void {
 }
 
 /**
- * Build the IPC instructions to embed in the prompt.
- * This tells Cursor how to use the IPC mechanism for sending messages and scheduling tasks.
+ * Write IPC instructions to a file in the workspace for the agent to reference.
  */
-function buildIpcInstructions(ctx: { chatJid: string; groupFolder: string; isMain: boolean }): string {
+function writeIpcInstructions(ctx: { chatJid: string; groupFolder: string; isMain: boolean }): void {
   const { chatJid, groupFolder, isMain } = ctx;
   
-  return `
-## NanoClaw IPC System
+  const instructions = `# NanoClaw IPC System
 
-You have access to a file-based IPC system for communicating with the host WhatsApp router.
-Write JSON files to the appropriate directories to trigger actions.
+Write JSON files to these directories to trigger actions:
 
-### Send Message to WhatsApp
-Write a JSON file to \`/workspace/ipc/messages/\` with this structure:
-\`\`\`json
-{
-  "type": "message",
-  "chatJid": "${chatJid}",
-  "text": "Your message here",
-  "groupFolder": "${groupFolder}",
-  "timestamp": "ISO timestamp"
-}
-\`\`\`
-Filename should be unique, e.g., \`{timestamp}-{random}.json\`
+## Send Message: /workspace/ipc/messages/{timestamp}.json
+{"type":"message","chatJid":"${chatJid}","text":"your message","groupFolder":"${groupFolder}","timestamp":"ISO"}
 
-### Schedule a Task
-Write a JSON file to \`/workspace/ipc/tasks/\` with this structure:
-\`\`\`json
-{
-  "type": "schedule_task",
-  "prompt": "What the agent should do when task runs",
-  "schedule_type": "cron|interval|once",
-  "schedule_value": "cron expression or milliseconds or ISO timestamp",
-  "context_mode": "group|isolated",
-  "groupFolder": "${groupFolder}",
-  "chatJid": "${chatJid}",
-  "timestamp": "ISO timestamp"
-}
-\`\`\`
+## Schedule Task: /workspace/ipc/tasks/{timestamp}.json  
+{"type":"schedule_task","prompt":"task description","schedule_type":"cron|interval|once","schedule_value":"expression","context_mode":"group|isolated","groupFolder":"${groupFolder}","chatJid":"${chatJid}","timestamp":"ISO"}
 
-### List Tasks
-Read \`/workspace/ipc/current_tasks.json\` to see scheduled tasks.
+## List Tasks: Read /workspace/ipc/current_tasks.json
 
-### Pause/Resume/Cancel Task
-Write to \`/workspace/ipc/tasks/\`:
-\`\`\`json
-{
-  "type": "pause_task|resume_task|cancel_task",
-  "taskId": "task-id-here",
-  "timestamp": "ISO timestamp"
-}
-\`\`\`
-
-${isMain ? `### Register New Group (Main Only)
-Write to \`/workspace/ipc/tasks/\`:
-\`\`\`json
-{
-  "type": "register_group",
-  "jid": "WhatsApp JID",
-  "name": "Display name",
-  "folder": "folder-name",
-  "trigger": "@TriggerWord",
-  "timestamp": "ISO timestamp"
-}
-\`\`\`
-Check \`/workspace/ipc/available_groups.json\` for available groups.` : ''}
+## Pause/Resume/Cancel: /workspace/ipc/tasks/{timestamp}.json
+{"type":"pause_task|resume_task|cancel_task","taskId":"id","timestamp":"ISO"}
+${isMain ? `
+## Register Group (main only): /workspace/ipc/tasks/{timestamp}.json
+{"type":"register_group","jid":"JID","name":"Name","folder":"folder","trigger":"@Trigger","timestamp":"ISO"}
+Available groups: /workspace/ipc/available_groups.json` : ''}
 `;
+  
+  fs.writeFileSync('/workspace/ipc/IPC_INSTRUCTIONS.md', instructions);
 }
 
 /**
@@ -132,22 +91,23 @@ Check \`/workspace/ipc/available_groups.json\` for available groups.` : ''}
 async function runCursorAgent(input: ContainerInput): Promise<ContainerOutput> {
   const { prompt, sessionId, groupFolder, chatJid, isMain, isScheduledTask } = input;
 
-  // Build the full prompt with IPC instructions
-  const ipcInstructions = buildIpcInstructions({ chatJid, groupFolder, isMain });
+  // Write IPC instructions to a file for the agent to reference
+  writeIpcInstructions({ chatJid, groupFolder, isMain });
   
   let fullPrompt = prompt;
   if (isScheduledTask) {
-    fullPrompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use the IPC system to send messages if needed.]\n\n${prompt}`;
+    fullPrompt = `[SCHEDULED TASK] ${prompt}`;
   }
   
-  // Add IPC instructions as system context
-  fullPrompt = `${ipcInstructions}\n\n---\n\n${fullPrompt}`;
+  // Add brief reference to IPC system (no newline to avoid spawn issues)
+  fullPrompt = `[IPC: See /workspace/ipc/IPC_INSTRUCTIONS.md] ${fullPrompt}`;
 
   // Build Cursor CLI arguments
   const args: string[] = [
     '-p', fullPrompt,
     '--output-format', 'json',
-    '--dangerously-skip-permissions'
+    '--force',  // Auto-approve commands
+    '--approve-mcps'  // Auto-approve MCP servers
   ];
 
   // Resume session if provided
@@ -156,15 +116,18 @@ async function runCursorAgent(input: ContainerInput): Promise<ContainerOutput> {
   }
 
   log(`Running Cursor agent with ${args.length} args, session: ${sessionId || 'new'}`);
+  log(`Prompt length: ${fullPrompt.length} chars`);
 
   return new Promise((resolve) => {
-    const agent = spawn('agent', args, {
+    // Use bash to run cursor-agent to ensure proper tty handling
+    const shellCmd = `cursor-agent ${args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')}`;
+    log(`Shell command: ${shellCmd.substring(0, 200)}...`);
+    
+    const agent = spawn('bash', ['-c', shellCmd], {
       cwd: '/workspace/group',
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],  // Don't pipe stdin - cursor-agent doesn't need it
       env: {
         ...process.env,
-        // Cursor uses CURSOR_API_KEY for authentication
-        // The env file should contain this
       }
     });
 
